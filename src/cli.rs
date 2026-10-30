@@ -12,17 +12,17 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "TOKEN")]
     pub token: Option<String>,
 
-    /// 文件间并发数
-    #[arg(long, global = true, default_value_t = 4, value_name = "N")]
-    pub jobs: usize,
+    /// 文件间并发数（默认 4，可被配置文件覆盖）
+    #[arg(long, global = true, value_name = "N")]
+    pub jobs: Option<usize>,
 
-    /// 每个文件的分片并发数
-    #[arg(long, global = true, default_value_t = 8, value_name = "N")]
-    pub connections: usize,
+    /// 每个文件的分片并发数（默认 8，可被配置文件覆盖）
+    #[arg(long, global = true, value_name = "N")]
+    pub connections: Option<usize>,
 
-    /// 单个请求的最大重试次数
-    #[arg(long, global = true, default_value_t = 3, value_name = "N")]
-    pub max_retries: u32,
+    /// 单个请求的最大重试次数（默认 3，可被配置文件覆盖）
+    #[arg(long, global = true, value_name = "N")]
+    pub max_retries: Option<u32>,
 
     /// 以 JSON 输出
     #[arg(long, global = true)]
@@ -75,6 +75,14 @@ pub enum Command {
         /// 要查看的 revision
         #[arg(long, default_value = "main")]
         revision: String,
+
+        /// 只包含匹配的文件（glob，可重复）
+        #[arg(long, value_name = "GLOB")]
+        include: Vec<String>,
+
+        /// 排除匹配的文件（glob，可重复）
+        #[arg(long, value_name = "GLOB")]
+        exclude: Vec<String>,
     },
 
     /// 管理本地缓存
