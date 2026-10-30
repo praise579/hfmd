@@ -78,6 +78,8 @@ async fn main() -> Result<()> {
                 .context("无法确定缓存目录，请设置 HF_HOME 或 HF_HUB_CACHE")?;
             let cache = RepoCache::new(&root, &repo_id)?;
             let store = StateStore::new(cache.repo_dir());
+            // 整个下载期间持有；第二个进程会立即失败而不是抢写段状态。
+            let _lock = hfmd::lock::RepoLock::acquire(cache.repo_dir())?;
 
             let jobs = cli.jobs.or(config.jobs).unwrap_or(4).max(1);
             let connections = cli.connections.or(config.connections).unwrap_or(8);
