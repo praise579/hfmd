@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use reqwest::header::{self, HeaderMap};
 use reqwest::{Client, Response, Url};
 use serde::Deserialize;
@@ -105,12 +105,9 @@ impl Api {
             return Ok(response);
         }
 
-        let hint = match status.as_u16() {
-            401 | 403 => "需要 token 或权限不足（gated 仓库需先在网页上同意条款）",
-            404 => "仓库或 revision 不存在",
-            _ => "服务端返回错误",
-        };
-        bail!("请求 {url} 失败：HTTP {status}，{hint}")
+        // 与下载路径共用同一张状态码映射表，避免两处提示不一致。
+        let typed = crate::error::from_status(status);
+        Err(anyhow::Error::new(typed).context(format!("请求 {url} 失败（HTTP {status}）")))
     }
 }
 

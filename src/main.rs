@@ -9,6 +9,7 @@ use hfmd::api::Api;
 use hfmd::cache::RepoCache;
 use hfmd::config::{self, resolve_endpoint, resolve_token};
 use hfmd::download::{Downloader, Outcome};
+use hfmd::error::RetryPolicy;
 use hfmd::state::StateStore;
 use tokio::task::JoinSet;
 
@@ -80,12 +81,14 @@ async fn main() -> Result<()> {
 
             let jobs = cli.jobs.or(config.jobs).unwrap_or(4).max(1);
             let connections = cli.connections.or(config.connections).unwrap_or(8);
+            let max_retries = cli.max_retries.or(config.max_retries).unwrap_or(3);
             let downloader = Downloader::new(
                 &endpoint,
                 token.as_deref(),
                 connections,
                 cli.quiet,
                 !skip_verify,
+                RetryPolicy::new(max_retries),
             )?;
 
             let semaphore = Arc::new(tokio::sync::Semaphore::new(jobs));

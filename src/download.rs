@@ -10,6 +10,7 @@ use reqwest::{Client, StatusCode, Url};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::cache::{RepoCache, blob_name};
+use crate::error::{HfmdError, Kind, RetryPolicy, from_status, is_retryable};
 use crate::repo::{FileEntry, format_bytes};
 use crate::segment;
 use crate::state::{STATE_VERSION, SegmentProgress, SegmentState, StateStore};
@@ -29,6 +30,7 @@ pub struct Downloader {
     connections: usize,
     quiet: bool,
     verify: bool,
+    retry: RetryPolicy,
 }
 
 impl Downloader {
@@ -38,6 +40,7 @@ impl Downloader {
         connections: usize,
         quiet: bool,
         verify: bool,
+        retry: RetryPolicy,
     ) -> Result<Self> {
         let http = Client::builder()
             .user_agent(format!("hfmd/{}", env!("CARGO_PKG_VERSION")))
@@ -51,6 +54,7 @@ impl Downloader {
             connections: connections.max(1),
             quiet,
             verify,
+            retry,
         })
     }
 
@@ -169,6 +173,7 @@ impl Downloader {
             let offsets = Arc::clone(&offsets);
             let written = Arc::clone(&written);
             let base = segment.start;
+            let policy = self.retry.clone();
 
             tasks.spawn(async move {
                 fetch_segment(
@@ -183,6 +188,7 @@ impl Downloader {
                     offsets,
                     index,
                     written,
+                    policy,
                 )
                 .await
             });
@@ -346,6 +352,7 @@ fn snapshot(blob: &str, size: u64, bounds: &[(u64, u64)], offsets: &[AtomicU64])
     }
 }
 
+/// 在 `start..=end` 区间内下载，失败按策略重试，并从已写入的位置继续。
 #[allow(clippy::too_many_arguments)]
 async fn fetch_segment(
     client: Client,
@@ -359,6 +366,60 @@ async fn fetch_segment(
     offsets: Arc<Vec<AtomicU64>>,
     index: usize,
     written: Arc<AtomicU64>,
+    policy: RetryPolicy,
+) -> Result<()> {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&part)
+        .with_context(|| format!("打开未完成文件失败：{}", part.display()))?;
+
+    let mut position = start;
+    let mut attempt = 0;
+
+    loop {
+        match stream_once(
+            &client,
+            token.as_deref(),
+            &url,
+            &file,
+            position,
+            end,
+            file_size,
+            base,
+            &offsets,
+            index,
+            &written,
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if !is_retryable(&err) || attempt >= policy.max_retries {
+                    return Err(err);
+                }
+                tokio::time::sleep(policy.delay(attempt)).await;
+                attempt += 1;
+                // 重试从已落盘的偏移继续，不重传已经写好的字节。
+                position = base + offsets[index].load(Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// 单次请求：从 `start` 读到 `end`，边读边定位写入。
+#[allow(clippy::too_many_arguments)]
+async fn stream_once(
+    client: &Client,
+    token: Option<&str>,
+    url: &Url,
+    file: &std::fs::File,
+    start: u64,
+    end: u64,
+    file_size: u64,
+    base: u64,
+    offsets: &[AtomicU64],
+    index: usize,
+    written: &AtomicU64,
 ) -> Result<()> {
     // 整文件单流时不要发 Range：不少服务端对完整文件的 Range 请求直接回 200，
     // 而对分段请求回 206。发 Range 反而会让单流路径失败。
@@ -384,20 +445,18 @@ async fn fetch_segment(
         status == StatusCode::PARTIAL_CONTENT
     };
     if !accepted {
-        let hint = match status.as_u16() {
-            200 => "服务端未按 Range 返回，可能不支持分段下载",
-            401 | 403 => "需要 token 或权限不足",
-            404 => "文件不存在",
-            416 => "服务端拒绝了请求的字节区间",
-            _ => "服务端返回错误",
+        let typed = if status == StatusCode::OK {
+            HfmdError::new(
+                Kind::Range,
+                "服务端未按 Range 返回，可能不支持分段下载",
+                false,
+            )
+        } else {
+            from_status(status)
         };
-        bail!("下载失败：HTTP {status}，{hint}（{url}）");
+        // 必须保留类型，否则重试策略无法识别「可重试」。
+        return Err(anyhow::Error::new(typed).context(format!("下载失败：{url}")));
     }
-
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&part)
-        .with_context(|| format!("打开未完成文件失败：{}", part.display()))?;
 
     let mut position = start;
     while let Some(chunk) = response
@@ -407,21 +466,30 @@ async fn fetch_segment(
     {
         let len = chunk.len() as u64;
         if position + len > end + 1 {
-            bail!("服务端返回的字节超出请求区间（{url}）");
+            return Err(anyhow::Error::new(HfmdError::new(
+                Kind::Range,
+                "服务端返回的字节超出请求区间",
+                false,
+            ))
+            .context(format!("{url}")));
         }
-        write_at(&file, &chunk, position)
-            .with_context(|| format!("写入未完成文件失败：{}", part.display()))?;
+        write_at(file, &chunk, position).with_context(|| format!("写入未完成文件失败：{url}"))?;
         position += len;
         offsets[index].store(position - base, Ordering::Relaxed);
         written.fetch_add(len, Ordering::Relaxed);
     }
 
     if position != end + 1 {
-        bail!(
-            "响应提前结束：期望到 {}，实际到 {}（{url}）",
-            end,
-            position.saturating_sub(1)
-        );
+        // 截断通常是网络抖动，值得重试；重试会从已写入的位置继续。
+        return Err(anyhow::Error::new(HfmdError::new(
+            Kind::Network,
+            format!(
+                "响应提前结束：期望到 {end}，实际到 {}",
+                position.saturating_sub(1)
+            ),
+            true,
+        ))
+        .context(format!("{url}")));
     }
 
     Ok(())
