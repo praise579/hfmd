@@ -5,3 +5,4 @@ pub mod cache;
 pub mod config;
 pub mod repo;
 pub mod segment;
+pub mod state;
