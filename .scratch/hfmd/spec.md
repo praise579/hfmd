@@ -121,5 +121,5 @@ v0.1 发布前必须同时满足：
 
 ## 待办
 
-- [ ] 创建 GitHub 仓库并把 issue 跟踪切回 GitHub Issues
+- [x] 创建 GitHub 仓库并把 issue 跟踪切回 GitHub Issues —— https://github.com/praise579/hfmd ，13 个 issue 已建并设置阻塞关系
 - [ ] 真机验证 xet 仓库的 `Range` 可用性（影响 ADR-0004 的降级分支）
