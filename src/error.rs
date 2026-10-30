@@ -81,6 +81,13 @@ pub fn from_status(status: StatusCode) -> HfmdError {
     }
 }
 
+/// 从错误链里取出类别标签，用于结构化日志。
+pub fn kind_of(err: &Error) -> Option<&'static str> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<HfmdError>())
+        .map(|typed| typed.kind.as_str())
+}
+
 /// 错误链里只要有传输层错误就重试；类型化错误按自身标记决定。
 ///
 /// 沿整条链查找：错误常被 `context` 包一层，只看最外层会漏掉类型化错误。

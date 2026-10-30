@@ -7,6 +7,7 @@ pub mod config;
 pub mod download;
 pub mod error;
 pub mod lock;
+pub mod logging;
 pub mod repo;
 pub mod segment;
 pub mod state;

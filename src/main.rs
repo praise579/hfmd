@@ -16,6 +16,7 @@ use tokio::task::JoinSet;
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    hfmd::logging::init(cli.quiet);
     let config = config::Config::load()?;
 
     let env_endpoint = std::env::var("HF_ENDPOINT").ok();
@@ -64,15 +65,18 @@ async fn main() -> Result<()> {
                 files.retain(|file| wanted.iter().any(|path| path == &file.path));
             }
 
-            let report = hfmd::repo::report(&repo_id, &revision, files);
-            if report.total_files == 0 {
+            let selection = hfmd::repo::report(&repo_id, &revision, files);
+            if selection.total_files == 0 {
                 bail!("没有匹配的文件");
             }
 
             if dry_run {
-                print!("{}", hfmd::repo::render(&report, cli.json, usize::MAX));
+                print!("{}", hfmd::repo::render(&selection, cli.json, usize::MAX));
                 return Ok(());
             }
+
+            let total_files = selection.total_files;
+            let total_bytes = selection.total_size;
 
             let root = hfmd::cache::default_root()
                 .context("无法确定缓存目录，请设置 HF_HOME 或 HF_HUB_CACHE")?;
@@ -97,7 +101,7 @@ async fn main() -> Result<()> {
             let mut tasks = JoinSet::new();
             let commit = api.resolve_commit(&repo_id, &revision).await?;
 
-            for file in report.files {
+            for file in selection.files {
                 let permit = Arc::clone(&semaphore)
                     .acquire_owned()
                     .await
@@ -115,29 +119,66 @@ async fn main() -> Result<()> {
                     let outcome = downloader
                         .download_file(&repo_id, &revision, &commit, &file, &cache, &store)
                         .await;
-                    (file.path, outcome)
+                    (file.path, file.size, outcome)
                 });
             }
 
-            let mut failures = 0;
+            let mut result = hfmd::download::DownloadReport {
+                repo_id: repo_id.clone(),
+                revision: revision.clone(),
+                commit: commit.clone(),
+                total_files,
+                total_bytes,
+                ..Default::default()
+            };
+
             while let Some(joined) = tasks.join_next().await {
-                let (path, outcome) = joined.context("下载任务异常终止")?;
+                let (path, size, outcome) = joined.context("下载任务异常终止")?;
                 match outcome {
-                    Ok(Outcome::Skipped) => {}
+                    Ok(Outcome::Skipped) => {
+                        result.skipped += 1;
+                        result.files.push(hfmd::download::FileOutcome {
+                            path,
+                            size,
+                            status: "skipped",
+                            error: None,
+                        });
+                    }
                     Ok(Outcome::Downloaded) => {
-                        if !cli.quiet {
+                        result.downloaded += 1;
+                        if !cli.quiet && !cli.json {
                             println!("完成：{path}");
                         }
+                        result.files.push(hfmd::download::FileOutcome {
+                            path,
+                            size,
+                            status: "downloaded",
+                            error: None,
+                        });
                     }
                     Err(err) => {
-                        failures += 1;
-                        eprintln!("失败：{path}：{err:#}");
+                        result.failed += 1;
+                        let kind = hfmd::error::kind_of(&err).unwrap_or("unknown");
+                        tracing::error!(kind = %kind, path = %path, "文件下载失败：{err:#}");
+                        result.files.push(hfmd::download::FileOutcome {
+                            path,
+                            size,
+                            status: "failed",
+                            error: Some(format!("{err:#}")),
+                        });
                     }
                 }
             }
 
-            if failures > 0 {
-                bail!("{failures} 个文件下载失败，断点已保留，可重新运行继续");
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+
+            if result.failed > 0 {
+                bail!(
+                    "{} 个文件下载失败，断点已保留，可重新运行继续",
+                    result.failed
+                );
             }
 
             // 整批文件都已落地后才更新引用，避免 refs 指向不完整的 snapshot。

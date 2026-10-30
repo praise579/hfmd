@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use reqwest::header::RANGE;
 use reqwest::{Client, StatusCode, Url};
+use serde::Serialize;
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::cache::{RepoCache, blob_name};
@@ -20,6 +21,30 @@ pub enum Outcome {
     /// blob 已存在，未发起任何请求。
     Skipped,
     Downloaded,
+}
+
+/// 一次下载运行的机器可读结果。字段名是稳定的对外契约。
+#[derive(Debug, Default, Serialize)]
+pub struct DownloadReport {
+    pub repo_id: String,
+    pub revision: String,
+    pub commit: String,
+    pub total_files: usize,
+    pub downloaded: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub total_bytes: u64,
+    pub files: Vec<FileOutcome>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileOutcome {
+    pub path: String,
+    pub size: u64,
+    /// `downloaded` / `skipped` / `failed`
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -230,9 +255,7 @@ impl Downloader {
                 // 内容不可信：连同段状态一起丢弃，避免下次从坏数据续传。
                 store.discard(&blob)?;
                 if retry_on_mismatch {
-                    if !self.quiet {
-                        eprintln!("校验失败，丢弃后重下：{}", file.path);
-                    }
+                    tracing::warn!(path = %file.path, "校验失败，丢弃后重下");
                     return Box::pin(
                         self.download_once(repo_id, revision, commit, file, cache, store, false),
                     )
@@ -246,15 +269,13 @@ impl Downloader {
                     verification.actual
                 );
             }
-            if !self.quiet {
-                eprintln!(
-                    "校验通过：{}（{}）",
-                    file.path,
-                    verification.algorithm.as_str()
-                );
-            }
-        } else if !self.quiet {
-            eprintln!("未校验：{}（--skip-verify）", file.path);
+            tracing::info!(
+                path = %file.path,
+                algorithm = verification.algorithm.as_str(),
+                "校验通过"
+            );
+        } else {
+            tracing::info!(path = %file.path, "未校验（--skip-verify）");
         }
 
         std::fs::rename(&part, &blob_path)
@@ -455,7 +476,7 @@ async fn stream_once(
             from_status(status)
         };
         // 必须保留类型，否则重试策略无法识别「可重试」。
-        return Err(anyhow::Error::new(typed).context(format!("下载失败：{url}")));
+        return Err(anyhow::Error::new(typed).context(url.to_string()));
     }
 
     let mut position = start;
@@ -596,5 +617,53 @@ mod tests {
         assert_eq!(state.segments[1].offset, 100);
         assert!(!state.is_complete());
         assert_eq!(state.resume_ranges(), vec![(40, 99)]);
+    }
+
+    #[test]
+    fn 下载报告_json_字段稳定() {
+        let report = DownloadReport {
+            repo_id: "org/name".into(),
+            revision: "main".into(),
+            commit: "c1".into(),
+            total_files: 2,
+            downloaded: 1,
+            skipped: 1,
+            failed: 0,
+            total_bytes: 10,
+            files: vec![
+                FileOutcome {
+                    path: "a.bin".into(),
+                    size: 10,
+                    status: "downloaded",
+                    error: None,
+                },
+                FileOutcome {
+                    path: "b.bin".into(),
+                    size: 0,
+                    status: "skipped",
+                    error: None,
+                },
+            ],
+        };
+
+        let value: serde_json::Value = serde_json::to_value(&report).unwrap();
+        for key in [
+            "repo_id",
+            "revision",
+            "commit",
+            "total_files",
+            "downloaded",
+            "skipped",
+            "failed",
+            "total_bytes",
+            "files",
+        ] {
+            assert!(value.get(key).is_some(), "缺少字段 {key}");
+        }
+        assert_eq!(value["files"][0]["status"], "downloaded");
+        assert!(
+            value["files"][0].get("error").is_none(),
+            "error 为空时应省略"
+        );
     }
 }
