@@ -147,8 +147,65 @@ async fn main() -> Result<()> {
         }
 
         Command::Cache { command } => match command {
-            CacheCommand::List => bail!("cache list 尚未实现（见 #11）"),
-            CacheCommand::Remove { .. } => bail!("cache remove 尚未实现（见 #11）"),
+            CacheCommand::List => {
+                let root = cache_root()?;
+                let repos = hfmd::cache_admin::list(&root)?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&repos)?);
+                } else {
+                    print!("{}", hfmd::cache_admin::render_list(&repos));
+                }
+                Ok(())
+            }
+
+            CacheCommand::Remove {
+                repo_id,
+                revision,
+                yes,
+            } => {
+                let root = cache_root()?;
+                if !yes {
+                    confirm(&repo_id, revision.as_deref())?;
+                }
+                let report = hfmd::cache_admin::remove(&root, &repo_id, revision.as_deref())?;
+                if cli.json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!(
+                        "已删除 {}：{} 个 revision，{} 个 blob，释放 {}",
+                        report.repo_id,
+                        report.removed_revisions.len(),
+                        report.removed_blobs,
+                        hfmd::repo::format_bytes(report.freed_bytes)
+                    );
+                }
+                Ok(())
+            }
         },
     }
+}
+
+fn cache_root() -> Result<std::path::PathBuf> {
+    hfmd::cache::default_root().context("无法确定缓存目录，请设置 HF_HOME 或 HF_HUB_CACHE")
+}
+
+/// 删除前的确认。stdin 不是终端（例如管道）时读不到内容，按取消处理。
+fn confirm(repo_id: &str, revision: Option<&str>) -> Result<()> {
+    use std::io::{BufRead, Write};
+
+    let target = match revision {
+        Some(revision) => format!("{repo_id}@{revision}"),
+        None => format!("{repo_id}（整个仓库）"),
+    };
+
+    eprint!("将删除 {target}，确认？[y/N] ");
+    std::io::stderr().flush().ok();
+
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        bail!("已取消");
+    }
+    Ok(())
 }

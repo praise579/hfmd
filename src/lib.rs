@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod cache;
+pub mod cache_admin;
 pub mod config;
 pub mod download;
 pub mod error;
