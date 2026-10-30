@@ -78,7 +78,7 @@ pub fn token_file_path() -> Option<PathBuf> {
     hf_home().map(|home| home.join("token"))
 }
 
-fn hf_home() -> Option<PathBuf> {
+pub fn hf_home() -> Option<PathBuf> {
     match std::env::var("HF_HOME") {
         Ok(value) if !value.trim().is_empty() => Some(PathBuf::from(value)),
         _ => dirs::home_dir().map(|home| home.join(".cache").join("huggingface")),
