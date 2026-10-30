@@ -20,6 +20,7 @@ pub enum LinkKind {
 /// ├── snapshots/<commit>/<仓库内相对路径>  → 相对符号链接
 /// └── refs/<分支>                          → commit hash
 /// ```
+#[derive(Debug, Clone)]
 pub struct RepoCache {
     repo_dir: PathBuf,
 }

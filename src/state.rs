@@ -100,6 +100,7 @@ impl SegmentState {
 /// 未完成文件与段状态的存放位置：`<repo_dir>/.hfmd/`。
 ///
 /// 刻意避开 `snapshots/`，否则半成品会出现在快照视图里，被 `transformers` 当成完整文件。
+#[derive(Debug, Clone)]
 pub struct StateStore {
     dir: PathBuf,
 }

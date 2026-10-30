@@ -60,6 +60,35 @@ impl Api {
         Ok(files)
     }
 
+    /// 把分支名或 tag 解析成 commit hash，用于 snapshot 目录名与 `refs/`。
+    pub async fn resolve_commit(&self, repo_id: &str, revision: &str) -> Result<String> {
+        crate::repo::split_repo_id(repo_id)?;
+
+        let mut url = Url::parse(&self.endpoint)
+            .with_context(|| format!("endpoint 不是合法 URL：{}", self.endpoint))?;
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|_| anyhow!("endpoint 不能作为基地址：{}", self.endpoint))?;
+            segments.pop_if_empty();
+            segments.push("api").push("models");
+            for part in repo_id.split('/').filter(|part| !part.is_empty()) {
+                segments.push(part);
+            }
+            segments.push("revision");
+            for part in revision.split('/').filter(|part| !part.is_empty()) {
+                segments.push(part);
+            }
+        }
+
+        let response = self.get(url.clone()).await?;
+        let info: RevisionInfo = response
+            .json()
+            .await
+            .with_context(|| format!("解析 revision 响应失败：{url}"))?;
+        Ok(info.sha)
+    }
+
     async fn get(&self, url: Url) -> Result<Response> {
         let mut request = self.http.get(url.clone());
         if let Some(token) = &self.token {
@@ -130,6 +159,11 @@ fn next_link(headers: &HeaderMap) -> Option<Url> {
     }
 
     None
+}
+
+#[derive(Debug, Deserialize)]
+struct RevisionInfo {
+    sha: String,
 }
 
 #[derive(Debug, Deserialize)]

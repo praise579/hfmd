@@ -3,6 +3,7 @@
 pub mod api;
 pub mod cache;
 pub mod config;
+pub mod download;
 pub mod repo;
 pub mod segment;
 pub mod state;
