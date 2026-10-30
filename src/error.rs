@@ -218,9 +218,13 @@ mod tests {
 
         assert!(policy.delay(0) >= Duration::from_millis(100));
         assert!(policy.delay(3) > policy.delay(1));
-        assert_eq!(
-            policy.delay(20),
-            policy.max_delay + jitter(policy.max_delay)
+
+        // 抖动每次都不同，只能断言区间：封顶值 + [0, 1/4 封顶值] 的抖动
+        let capped = policy.delay(20);
+        assert!(capped >= policy.max_delay);
+        assert!(
+            capped <= policy.max_delay + policy.max_delay / 4 + Duration::from_millis(1),
+            "抖动不应超过基值的 1/4，实际 {capped:?}"
         );
     }
 
