@@ -7,3 +7,4 @@ pub mod download;
 pub mod repo;
 pub mod segment;
 pub mod state;
+pub mod verify;

@@ -28,6 +28,7 @@ pub struct Downloader {
     token: Option<String>,
     connections: usize,
     quiet: bool,
+    verify: bool,
 }
 
 impl Downloader {
@@ -36,6 +37,7 @@ impl Downloader {
         token: Option<&str>,
         connections: usize,
         quiet: bool,
+        verify: bool,
     ) -> Result<Self> {
         let http = Client::builder()
             .user_agent(format!("hfmd/{}", env!("CARGO_PKG_VERSION")))
@@ -48,12 +50,14 @@ impl Downloader {
             token: token.map(str::to_string),
             connections: connections.max(1),
             quiet,
+            verify,
         })
     }
 
     /// 下载单个文件到 blob，可跨进程续传。
     ///
-    /// 失败时保留段状态与 `.part`，下次运行从断点继续。
+    /// 失败时保留段状态与 `.part`，下次运行从断点继续；
+    /// 校验不匹配时丢弃并自动重下一次。
     pub async fn download_file(
         &self,
         repo_id: &str,
@@ -62,6 +66,21 @@ impl Downloader {
         file: &FileEntry,
         cache: &RepoCache,
         store: &StateStore,
+    ) -> Result<Outcome> {
+        self.download_once(repo_id, revision, commit, file, cache, store, true)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn download_once(
+        &self,
+        repo_id: &str,
+        revision: &str,
+        commit: &str,
+        file: &FileEntry,
+        cache: &RepoCache,
+        store: &StateStore,
+        retry_on_mismatch: bool,
     ) -> Result<Outcome> {
         let blob = blob_name(file)?;
         let blob_path = cache.blob_path(&blob);
@@ -137,6 +156,7 @@ impl Downloader {
         );
 
         let mut tasks = JoinSet::new();
+        let file_size = file.size;
         for (index, segment) in state.segments.iter().enumerate() {
             let Some((resume_start, end)) = segment.remaining() else {
                 continue;
@@ -159,6 +179,7 @@ impl Downloader {
                     base,
                     resume_start,
                     end,
+                    file_size,
                     offsets,
                     index,
                     written,
@@ -197,7 +218,39 @@ impl Downloader {
         let finished = snapshot(&blob, file.size, &bounds, &offsets);
         store.save(&finished)?;
 
-        // 校验将在 #8 插入到这里：先验证 .part，再 rename。
+        if self.verify {
+            let verification = crate::verify::verify_file(&part, file)?;
+            if !verification.matched() {
+                // 内容不可信：连同段状态一起丢弃，避免下次从坏数据续传。
+                store.discard(&blob)?;
+                if retry_on_mismatch {
+                    if !self.quiet {
+                        eprintln!("校验失败，丢弃后重下：{}", file.path);
+                    }
+                    return Box::pin(
+                        self.download_once(repo_id, revision, commit, file, cache, store, false),
+                    )
+                    .await;
+                }
+                bail!(
+                    "校验失败：{}（{} 期望 {}，实际 {}）",
+                    file.path,
+                    verification.algorithm.as_str(),
+                    verification.expected,
+                    verification.actual
+                );
+            }
+            if !self.quiet {
+                eprintln!(
+                    "校验通过：{}（{}）",
+                    file.path,
+                    verification.algorithm.as_str()
+                );
+            }
+        } else if !self.quiet {
+            eprintln!("未校验：{}（--skip-verify）", file.path);
+        }
+
         std::fs::rename(&part, &blob_path)
             .with_context(|| format!("提交 blob 失败：{}", blob_path.display()))?;
         store.discard(&blob)?;
@@ -302,13 +355,19 @@ async fn fetch_segment(
     base: u64,
     start: u64,
     end: u64,
+    file_size: u64,
     offsets: Arc<Vec<AtomicU64>>,
     index: usize,
     written: Arc<AtomicU64>,
 ) -> Result<()> {
-    let mut request = client
-        .get(url.clone())
-        .header(RANGE, format!("bytes={start}-{end}"));
+    // 整文件单流时不要发 Range：不少服务端对完整文件的 Range 请求直接回 200，
+    // 而对分段请求回 206。发 Range 反而会让单流路径失败。
+    let whole_file = start == 0 && end + 1 == file_size;
+
+    let mut request = client.get(url.clone());
+    if !whole_file {
+        request = request.header(RANGE, format!("bytes={start}-{end}"));
+    }
     if let Some(token) = token {
         request = request.bearer_auth(token);
     }
@@ -319,7 +378,12 @@ async fn fetch_segment(
         .with_context(|| format!("请求失败：{url}"))?;
 
     let status = response.status();
-    if status != StatusCode::PARTIAL_CONTENT {
+    let accepted = if whole_file {
+        status.is_success()
+    } else {
+        status == StatusCode::PARTIAL_CONTENT
+    };
+    if !accepted {
         let hint = match status.as_u16() {
             200 => "服务端未按 Range 返回，可能不支持分段下载",
             401 | 403 => "需要 token 或权限不足",

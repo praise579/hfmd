@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
             revision,
             include,
             exclude,
-            skip_verify: _,
+            skip_verify,
             dry_run,
         } => {
             let api = Api::new(&endpoint, token.as_deref())?;
@@ -80,7 +80,13 @@ async fn main() -> Result<()> {
 
             let jobs = cli.jobs.or(config.jobs).unwrap_or(4).max(1);
             let connections = cli.connections.or(config.connections).unwrap_or(8);
-            let downloader = Downloader::new(&endpoint, token.as_deref(), connections, cli.quiet)?;
+            let downloader = Downloader::new(
+                &endpoint,
+                token.as_deref(),
+                connections,
+                cli.quiet,
+                !skip_verify,
+            )?;
 
             let semaphore = Arc::new(tokio::sync::Semaphore::new(jobs));
             let mut tasks = JoinSet::new();
