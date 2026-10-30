@@ -1,0 +1,21 @@
+{
+  "version": "0.1.0",
+  "description": "Hugging Face model downloader with segmented resume and hash verification",
+  "homepage": "https://github.com/praise579/hfmd",
+  "license": "MIT OR Apache-2.0",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/praise579/hfmd/releases/download/v0.1.0/hfmd-x86_64-pc-windows-msvc.zip",
+      "hash": "REPLACE_WITH_SHA256"
+    }
+  },
+  "bin": "hfmd.exe",
+  "checkver": "github",
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/praise579/hfmd/releases/download/v$version/hfmd-x86_64-pc-windows-msvc.zip"
+      }
+    }
+  }
+}

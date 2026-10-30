@@ -268,11 +268,12 @@ mod tests {
         let flat = cache
             .link_into_snapshot("c1", "config.json", "blob1")
             .unwrap();
-        assert_eq!(flat, LinkKind::Symlink);
+        // Windows 无 symlink 权限时会退化为硬链接，两者都是可接受的结果
+        assert!(matches!(flat, LinkKind::Symlink | LinkKind::HardLink));
         let nested = cache
             .link_into_snapshot("c1", "sub/dir/weight.bin", "blob1")
             .unwrap();
-        assert_eq!(nested, LinkKind::Symlink);
+        assert!(matches!(nested, LinkKind::Symlink | LinkKind::HardLink));
 
         #[cfg(unix)]
         {

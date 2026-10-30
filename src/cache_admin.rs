@@ -84,6 +84,7 @@ fn remove_revision(cache: &RepoCache, repo_id: &str, revision: &str) -> Result<R
     if !target.is_dir() {
         bail!("本地没有该 revision 的快照：{repo_id}@{revision}");
     }
+    ensure_symlink_snapshot(&target)?;
 
     let own = blob_names(&target)?;
     let mut referenced_elsewhere = HashSet::new();
@@ -168,6 +169,32 @@ fn dir_size(path: &Path) -> Result<u64> {
     }
 
     Ok(total)
+}
+
+/// 只有符号链接才能从快照反查 blob 名。
+///
+/// Windows 无 symlink 权限时会退化为硬链接或复制，此时无法判断共享关系，
+/// 按 revision 删除可能误删其他 revision 仍在用的 blob，因此直接拒绝。
+fn ensure_symlink_snapshot(snapshot: &Path) -> Result<()> {
+    let mut stack = vec![snapshot.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        for entry in read_dir_optional(&dir)? {
+            let metadata = entry.metadata()?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                stack.push(entry.path());
+            } else {
+                bail!(
+                    "该快照使用硬链接或复制而非符号链接，无法安全地按 revision 删除；请改用 `cache remove <repo>` 删除整个仓库"
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// 收集快照里所有符号链接指向的 blob 名。
@@ -304,6 +331,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(unix)]
     #[test]
     fn 删除单个_revision_保留共享_blob() {
         let root = temp_root();
@@ -324,6 +352,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(unix)]
     #[test]
     fn 删除_revision_会清理独占_blob_与段状态() {
         let root = temp_root();
@@ -350,6 +379,23 @@ mod tests {
             "段状态应一并清理"
         );
         assert!(!state_dir.join("blob-only.part").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn 非符号链接快照拒绝按_revision_删除() {
+        let root = temp_root();
+        let cache = seed(&root, "org/name", "c1", &[("a.bin", "blob-a")]);
+
+        // 用普通文件替换符号链接，模拟 Windows 上退化为硬链接或复制的情况
+        let target = cache.snapshot_dir("c1").join("a.bin");
+        std::fs::remove_file(&target).unwrap();
+        std::fs::write(&target, b"copy").unwrap();
+
+        let err = remove(&root, "org/name", Some("c1")).expect_err("应拒绝");
+        assert!(err.to_string().contains("硬链接或复制"), "实际：{err}");
+        assert!(cache.repo_dir().exists(), "拒绝时不应删除任何内容");
 
         let _ = std::fs::remove_dir_all(&root);
     }
